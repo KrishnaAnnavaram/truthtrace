@@ -82,7 +82,7 @@ class VerificationResult:
     query: str
     mode: str  # "claim" | "question"
     label: Label
-    method: str  # "matched_fact_check" | "llm_judgement" | "llm_answer" | "abstained"
+    method: str  # "matched_fact_check" | "llm_judgement" | "llm_answer" | "evidence_only" | "abstained"
     rationale: str
     citations: list[Evidence] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)

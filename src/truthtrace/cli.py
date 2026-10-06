@@ -61,8 +61,9 @@ def cmd_ingest(args) -> int:
                                 max_items=args.max_items or s.max_items)
         print(json.dumps(report.to_dict(), indent=2))
 
-    if args.every:
-        run_every(args.every, job)
+    if args.every is not None:
+        # "--every" alone uses TRUTHTRACE_INGEST_INTERVAL_HOURS (default 24); "--every N" uses N hours.
+        run_every(s.ingest_interval_hours if args.every == "env" else float(args.every), job)
     else:
         job()
     return 0
@@ -142,7 +143,8 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("ingest", help="fetch new fact-checks from source feeds (polite, incremental)")
     p.add_argument("--source", choices=["all", *ADAPTERS], default="all")
     p.add_argument("--max-items", type=int, help="maximum article pages to fetch in this run")
-    p.add_argument("--every", type=float, help="repeat every N hours (minimum 1)")
+    p.add_argument("--every", nargs="?", const="env", metavar="N",
+                   help="repeat every N hours (minimum 1); without N, use TRUTHTRACE_INGEST_INTERVAL_HOURS")
     p.set_defaults(func=cmd_ingest)
 
     p = sub.add_parser("import", help="import articles from a .jsonl or .csv file")

@@ -1,5 +1,6 @@
 """Problems 2, 5 and 11: verdicts dropped, mismatched date columns, aggressive scraping."""
 import json
+import xml.etree.ElementTree as ET
 
 import pytest
 
@@ -73,6 +74,49 @@ def test_rss_parsing():
     items = parse_feed(RSS)
     assert [i.title for i in items] == ["One", "Two", "Not a fact-check"]
     assert items[0].published.isoformat() == "2024-05-02"
+
+
+# Shape of the live PolitiFact feed in 2026: blank lines before the XML declaration, undeclared
+# namespace prefixes, HTML inside content:encoded, and article links without "www.".
+SLOPPY_RSS = b"""
+
+<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:atom="http://www.w3.org/2005/Atom" version="2.0"><channel>
+<item><title>Bridge &amp; tunnel claim</title>
+<link>https://politifact.com/factchecks/2026/oct/05/sam-patel/bridge-closure/</link>
+<pubDate>Mon, 05 Oct 2026 21:41:48 +0000</pubDate>
+<content:encoded><![CDATA[<p>Body with <link> and <title>noise</title></p>]]></content:encoded>
+<dc:creator>Staff</dc:creator></item>
+</channel></rss>"""
+
+PF_PAGE_2026 = """<html><body><h1>Bridge will not close for two years</h1>
+<article class="single-container"><div class="pf-statement pf-statement-lg pf-statement-false">
+<a class="pf-statement-person mb-2" href="#">Sam Patel</a>
+<div class="pf-statement-quote mb-4 pb-2"><p>The bridge will be closed for two years.</p></div>
+<div class="pf-statement-meter d-flex"><img src="meter-false.jpg" alt="False"></div></div>
+<div class="m-textblock"><p>The schedule closes the bridge for 14 weeks.</p></div>
+<div class="pf-statement-quote text-dark"><p>A related, different claim.</p></div></article></body></html>"""
+
+
+def test_sloppy_feed_is_read_with_the_tolerant_fallback():
+    items = parse_feed(SLOPPY_RSS)
+    assert len(items) == 1
+    assert items[0].title == "Bridge & tunnel claim"
+    assert items[0].published.isoformat() == "2026-10-05"
+    assert politifact.is_article_url(items[0].url)
+
+
+def test_a_page_that_is_not_a_feed_still_fails():
+    with pytest.raises(ET.ParseError):
+        parse_feed(b"<html><body><p>Service unavailable</p></body></html")
+
+
+def test_politifact_2026_layout_fallback():
+    article = politifact.parse_article(PF_PAGE_2026, "https://politifact.com/factchecks/2026/oct/05/a/b/")
+    assert article.claim == "The bridge will be closed for two years."
+    assert article.speaker == "Sam Patel"
+    assert article.label == Label.FALSE
+    assert "14 weeks" in article.body
 
 
 def test_record_import_maps_both_date_columns_and_reports_bad_rows(tmp_path):

@@ -20,6 +20,7 @@ from .storage import Store
 from .verify import Verifier
 
 COARSE_CLASSES = ("supported", "mixed", "refuted")
+VERDICT_METHODS = ("matched_fact_check", "llm_judgement")
 
 
 @dataclass
@@ -77,7 +78,7 @@ def recall_at_k(retrieved: list[list[str]], relevant: list[frozenset[str]], k: i
 def citation_support(results: list[VerificationResult]) -> float | None:
     """Share of verdicts whose cited evidence exists in the retrieved set and, when the cited
     fact-check has a rating, points the same way (supported/mixed/refuted) as the verdict."""
-    judged = [r for r in results if r.method in ("matched_fact_check", "llm_judgement")]
+    judged = [r for r in results if r.method in VERDICT_METHODS]
     if not judged:
         return None
     good = 0
@@ -93,7 +94,7 @@ def citation_support(results: list[VerificationResult]) -> float | None:
 @dataclass
 class EvalReport:
     n: int
-    coverage: float  # share of claims that received a verdict (not abstained)
+    coverage: float  # share of claims that received a verdict (matched fact-check or LLM judgement)
     accuracy_answered: float | None  # exact 6-way label accuracy on answered claims
     coarse_accuracy_answered: float | None
     coarse_macro_f1_answered: float | None
@@ -109,7 +110,9 @@ class EvalReport:
 
 def evaluate(verifier: Verifier, examples: list[Example], *, before: date | None = None, k: int = 5) -> EvalReport:
     results = [verifier.verify(ex.claim, before=before) for ex in examples]
-    answered = [(ex, r) for ex, r in zip(examples, results) if not r.abstained]
+    # Only a verdict counts as an answer. A test claim that reads like a question gets an evidence-only
+    # or an LLM answer without a label, and that is not a verdict.
+    answered = [(ex, r) for ex, r in zip(examples, results) if r.method in VERDICT_METHODS]
     gold_coarse = [ex.gold.coarse for ex, _ in answered]
     pred_coarse = [r.label.coarse for _, r in answered]
     confusion: dict[str, dict[str, int]] = {}

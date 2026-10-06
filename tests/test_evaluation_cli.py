@@ -48,6 +48,14 @@ def test_evaluate_reports_coverage_accuracy_and_citations(tmp_path):
     assert report.methods == {"matched_fact_check": 2, "abstained": 1}
 
 
+def test_a_claim_that_reads_like_a_question_is_not_counted_as_answered(tmp_path):
+    services = make_services(tmp_path)
+    examples = [Example("Did the Riverton bridge close to all traffic for two years?", Label.FALSE)]
+    report = evaluate(services.verifier, examples)
+    assert report.methods == {"evidence_only": 1}
+    assert report.coverage == 0.0 and report.accuracy_answered is None
+
+
 def test_load_liar_tsv(tmp_path):
     path = tmp_path / "liar.tsv"
     path.write_text("1.json\tpants-fire\tA made-up statement.\ttopic\tsomeone\n"
@@ -77,3 +85,15 @@ def test_cli_demo_check_and_eval(tmp_path, capsys):
 
     assert main(["--db", db, "index"]) == 0
     assert json.loads(capsys.readouterr().out)["chunks_changed"] == 0  # idempotent
+
+
+def test_ingest_every_uses_the_interval_setting(tmp_path, monkeypatch):
+    import truthtrace.cli as cli
+
+    seen = []
+    monkeypatch.setattr(cli, "run_every", lambda hours, job: seen.append(hours))
+    monkeypatch.setenv("TRUTHTRACE_INGEST_INTERVAL_HOURS", "6")
+    db = str(tmp_path / "tt.db")
+    assert main(["--db", db, "ingest", "--every"]) == 0
+    assert main(["--db", db, "ingest", "--every", "12"]) == 0
+    assert seen == [6.0, 12.0]
