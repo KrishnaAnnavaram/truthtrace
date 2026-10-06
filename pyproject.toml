@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "truthtrace"
+version = "0.1.0"
+description = "RAG fact-checker grounded in FactCheck.org and PolitiFact"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Krishna Annavaram" }]
+requires-python = ">=3.10"
+# Storage (SQLite), BM25, HTML/RSS parsing and the hashing embedder use only the standard library.
+dependencies = []
+
+[project.optional-dependencies]
+embeddings = ["sentence-transformers>=2.6"]   # dense embeddings + cross-encoder reranking
+fast = ["numpy>=1.26"]
+gemini = ["google-genai>=1.0"]
+openai = ["openai>=1.40"]
+ui = ["streamlit>=1.37"]
+dotenv = ["python-dotenv>=1.0"]
+all = ["truthtrace[embeddings,fast,gemini,openai,ui,dotenv]"]
+dev = ["pytest>=8", "ruff"]
+
+[project.scripts]
+truthtrace = "truthtrace.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+truthtrace = ["prompts/*.txt", "demo/*.jsonl"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 110

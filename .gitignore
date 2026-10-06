@@ -1,0 +1,31 @@
+# secrets
+.env
+.env.*
+!.env.example
+
+# runtime data: scraped articles, databases, indexes, eval sets (never commit)
+data/
+scraped_results/
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.index
+*.pkl
+*.csv
+*.tsv
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+.streamlit/secrets.toml

@@ -1,0 +1,10 @@
+Conversation so far (most recent last, for context only):
+$history
+
+Current question:
+$question
+
+Evidence:
+$evidence
+
+Return JSON: {"answer": "...", "citations": ["E1"]}

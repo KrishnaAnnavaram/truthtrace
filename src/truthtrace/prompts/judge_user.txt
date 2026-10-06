@@ -1,0 +1,7 @@
+Claim to check:
+$claim
+
+Evidence:
+$evidence
+
+Return JSON: {"label": "...", "rationale": "...", "citations": ["E1"]}
