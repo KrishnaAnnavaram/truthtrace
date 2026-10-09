@@ -72,6 +72,7 @@ This README is the **one location that explains all of truthtrace**. It gives th
 4. 🔄 [The end-to-end workflow](#4-the-end-to-end-workflow)
    - 4.1 [Full flow](#41-full-flow)
    - 4.2 [The life cycle of one claim](#42-the-life-cycle-of-one-claim)
+   - 4.3 [Who does which step](#43-who-does-which-step)
 5. 🔵 [The ingestion stage](#5-the-ingestion-stage)
 6. 🟢 [The import stage](#6-the-import-stage)
 7. 🟣 [The store](#7-the-store)
@@ -161,6 +162,62 @@ flowchart LR
 | CLI | `src/truthtrace/cli.py` | The `truthtrace` command with 8 subcommands |
 | Streamlit UI | `src/truthtrace/ui/streamlit_app.py` | Chat with evidence cards |
 
+The component map shows which module calls which module. An arrow points from the caller to the module that it uses.
+
+```mermaid
+flowchart TB
+    subgraph FRONT["Front ends"]
+        CLI["cli.py<br/>truthtrace command"]
+        UI["ui/streamlit_app.py<br/>chat page"]
+        CHAT["chat.py<br/>ChatSession, BoundedHistory"]
+    end
+    RUN["runtime.py<br/>build_services"]
+    CFG["config.py<br/>Settings"]
+    subgraph INGEST["Ingestion and import"]
+        ING["ingest.py<br/>ingest_sources, import_file, run_every"]
+        SRC["sources/<br/>PoliteFetcher, parse_feed, ADAPTERS, load_records"]
+    end
+    subgraph DATA["Store and index"]
+        STO[("storage.py<br/>Store")]
+        IDX["indexing.py<br/>Indexer"]
+        EMB["embeddings.py<br/>get_embedder"]
+    end
+    subgraph ANSWER["Retrieval and verdict"]
+        RET["retrieval.py<br/>HybridRetriever"]
+        BM["bm25.py<br/>BM25"]
+        RR["rerank.py<br/>get_reranker"]
+        VER["verify.py<br/>Verifier"]
+        LLM["llm.py<br/>build_llm"]
+    end
+    EVA["evaluation.py<br/>evaluate"]
+    CLI --> RUN
+    UI --> RUN
+    UI --> CHAT
+    CHAT --> VER
+    RUN --> CFG
+    CLI --> ING
+    CLI --> EVA
+    ING --> SRC
+    ING --> STO
+    ING --> IDX
+    RUN --> STO
+    RUN --> IDX
+    RUN --> RET
+    RUN --> VER
+    RUN --> LLM
+    IDX --> STO
+    IDX --> EMB
+    RET --> STO
+    RET --> EMB
+    RET --> BM
+    RET --> RR
+    VER --> RET
+    VER --> RR
+    VER --> LLM
+    EVA --> VER
+    EVA --> STO
+```
+
 ### 2.2 System context
 
 ```mermaid
@@ -238,6 +295,21 @@ are extras.
 `get_embedder()` and `get_reranker()` are cached (`lru_cache`). The retriever keeps its BM25 and vector
 data in memory and loads them again only when the index version changes (`retrieval.py`).
 
+```mermaid
+flowchart TD
+    Q[/"search(query)"/] --> VER["store.index_version"]
+    VER --> SAME{"Same version as<br/>the snapshot in memory?"}
+    SAME -- "yes" --> SNAP["Use the snapshot"]
+    SAME -- "no" --> LOAD["_load: all_chunks, BM25,<br/>vectors, published_map"]
+    LOAD --> SNAP
+    W[/"upsert_article, sync_chunks,<br/>set_vectors"/] --> BUMP[("meta: index_version + 1")]
+    BUMP --> VER
+    SNAP --> EMB["get_embedder: lru_cache,<br/>one model for each process"]
+    SNAP --> RR["get_reranker: lru_cache"]
+    EMB --> OUT[/"Evidence list"/]
+    RR --> OUT
+```
+
 ---
 
 ## 4. The end-to-end workflow
@@ -245,21 +317,21 @@ data in memory and loads them again only when the index version changes (`retrie
 ### 4.1 Full flow
 
 ```mermaid
-flowchart TB
+flowchart TD
     subgraph ING["Ingestion and import"]
-        RSS["RSS feeds: PolitiFact, FactCheck.org"] --> PF["Polite fetcher: robots.txt, user agent, delay, retries"]
+        RSS[/"RSS feeds: PolitiFact, FactCheck.org"/] --> PF["Polite fetcher: robots.txt, user agent, delay, retries"]
         PF --> AD["Source adapters: ClaimReview JSON-LD, HTML fallback"]
-        FILE["JSONL or CSV file"] --> REC["Record loader: bad rows reported"]
+        FILE[/"JSONL or CSV file"/] --> REC["Record loader: bad rows reported"]
     end
-    AD --> DB["Store: articles, unique URL, content hash"]
+    AD --> DB[("Store: articles, unique URL, content hash")]
     REC --> DB
     subgraph IDX["Index"]
         DB --> CH["Chunks: claim card + 180-word body windows"]
         CH --> EMB["Embedder: hashing or sentence-transformers"]
-        EMB --> VEC["Vectors in SQLite"]
+        EMB --> VEC[("Vectors in SQLite")]
     end
     subgraph VER["Verifier"]
-        Q["User message"] --> CLS["Claim or question?"]
+        Q[/"User message"/] --> CLS{"Claim or question?"}
         CLS --> RET["Hybrid retrieval: BM25 + dense, RRF, rerank, one result for each article"]
         VEC --> RET
         RET --> TH{"Relevance at least 0.2?"}
@@ -270,14 +342,46 @@ flowchart TB
         MT -->|"no, LLM set"| LLMJ["LLM label + rationale + citations, validated"]
         MT -->|"no LLM"| AB
     end
-    EXP --> UI["CLI or Streamlit chat with evidence cards"]
+    EXP --> UI[/"CLI or Streamlit chat with evidence cards"/]
     LLMJ --> UI
     ANS --> UI
     AB --> UI
+    UI --> HUMAN{{"HUMAN<br/>read the cited fact-check<br/>before you use the verdict"}}
     EVAL["Evaluation: time split or LIAR"] -.-> VER
+
+    classDef human fill:#fff3cd,stroke:#b8901f,color:#3d2f00,font-weight:bold
+    class HUMAN human
 ```
 
 ### 4.2 The life cycle of one claim
+
+```mermaid
+stateDiagram-v2
+    state "User message" as Msg
+    state "Claim text" as Claim
+    state "Evidence E1 to Ek" as Ev
+    state "Relevant evidence" as Rel
+    state "Match check" as Match
+    state "LLM judgement" as Judge
+    state "matched_fact_check" as Matched
+    state "llm_judgement" as LlmVerdict
+    state "abstained, Can't verify" as Abstained
+    [*] --> Msg
+    Msg --> Claim: classify_query, remove the wrapper
+    Msg --> Abstained: empty message
+    Claim --> Ev: HybridRetriever.search
+    Ev --> Rel: relevance at least TRUTHTRACE_ABSTAIN_THRESHOLD
+    Ev --> Abstained: no relevant evidence
+    Rel --> Match: claim_match for each rated item
+    Match --> Matched: similarity at least 0.6, no problem, no conflict
+    Match --> Judge: no usable match, LLM set
+    Match --> Abstained: no usable match, no LLM
+    Judge --> LlmVerdict: label on the scale, rationale, known citations
+    Judge --> Abstained: failed validation, llm error or label unverifiable
+    Matched --> [*]
+    LlmVerdict --> [*]
+    Abstained --> [*]: related fact-checks shown
+```
 
 1. The ingestion stage or the import stage stores the fact-checks in the store.
 2. The index stage makes the chunks and their vectors.
@@ -290,11 +394,74 @@ flowchart TB
 9. Otherwise, if an LLM is set, the LLM judges the claim and truthtrace validates the output.
 10. Otherwise, truthtrace abstains and shows the related fact-checks.
 
+### 4.3 Who does which step
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant CLI as truthtrace CLI
+    participant RT as runtime.build_services
+    participant VER as Verifier
+    participant RET as HybridRetriever
+    participant ST as Store
+    participant RR as Reranker
+    participant LLM as LLM provider
+
+    U->>CLI: truthtrace check with the claim
+    CLI->>CLI: load_dotenv_if_present, Settings.from_env
+    CLI->>RT: build_services(settings)
+    RT-->>CLI: Store, Indexer, HybridRetriever, Verifier, LLM or none
+    CLI->>VER: verify(claim)
+    VER->>VER: classify_query
+    VER->>RET: search(query, top_k)
+    RET->>ST: index_version, all_chunks if the version changed
+    RET->>RET: BM25 top 40, dense top 40, RRF, best chunk of each article
+    RET->>ST: get_many(article IDs)
+    RET->>RR: score passages and claims
+    RET-->>VER: Evidence E1 to Ek
+    VER->>RR: claim_match for each rated item
+    alt close match without problems or conflict
+        VER-->>CLI: matched_fact_check with one citation
+    else LLM set
+        VER->>LLM: complete_json(judge_claim, JUDGE_SCHEMA)
+        LLM-->>VER: label, rationale, citations
+        VER->>VER: validate label and citation IDs
+        VER-->>CLI: llm_judgement or abstained
+    else no LLM
+        VER-->>CLI: abstained with related evidence
+    end
+    CLI-->>U: verdict, rationale, citations, notes
+```
+
 ---
 
 ## 5. The ingestion stage
 
 **Purpose.** Get new fact-checks from the feeds of the fact-checkers and store them (`ingest_sources()` in `ingest.py`).
+
+```mermaid
+flowchart TD
+    START[/"Source names, max_items"/] --> KNOWN["store.known_urls"]
+    KNOWN --> FEED["For each adapter and feed URL:<br/>fetcher.get, parse_feed"]
+    FEED -- "feed error" --> ERRS["Add to errors,<br/>next feed"]
+    FEED --> URL{"is_article_url?"}
+    URL -- "no" --> NEXT["Next item"]
+    URL -- "yes" --> KN{"URL in the store?"}
+    KN -- "yes" --> SKIP["skipped_known"]
+    KN -- "no" --> BUD{"Page limit left?"}
+    BUD -- "no" --> NEXT
+    BUD -- "yes" --> GET["fetcher.get, adapter.parse_article"]
+    GET -- "FetchBlocked" --> BLK["blocked"]
+    GET -- "ParseError or TransientError" --> FAIL["failed"]
+    GET --> UPS["store.upsert_article"]
+    UPS --> CHG{"inserted or updated?"}
+    CHG -- "yes" --> SYNC["indexer.sync_article"]
+    CHG -- "no" --> NEXT
+    SYNC --> NEXT
+    NEXT --> EMB["At the end: indexer.embed_pending"]
+    EMB --> REP[/"IngestReport"/]
+```
 
 | Input | Output |
 |---|---|
@@ -319,7 +486,40 @@ flowchart TB
 | `politifact` | `https://www.politifact.com/rss/factchecks/` | `https://[www.]politifact.com/factchecks/YYYY/mon/D/<speaker>/<slug>/` | Claim, speaker, rating and date from `ClaimReview` JSON-LD. HTML fallback for the `m-statement` layout and the 2026 `pf-statement` layout. Body from `m-textblock` |
 | `factcheck.org` | `https://www.factcheck.org/feed/` | `https://www.factcheck.org/YYYY/MM/<slug>/` | Title, body from `entry-content`, date, summary. Claim and rating only if the page has `ClaimReview` JSON-LD |
 
+The PolitiFact adapter reads each field from JSON-LD first and from the HTML layouts second:
+
+```mermaid
+flowchart LR
+    PAGE[/"Article page HTML"/] --> JL{"ClaimReview JSON-LD?"}
+    JL -- "yes" --> F1["claimReviewed, reviewRating,<br/>itemReviewed author, datePublished"]
+    JL -- "no" --> F2["Empty fields"]
+    F1 --> FB["Fill each empty field from HTML:<br/>m-statement, then pf-statement"]
+    F2 --> FB
+    FB --> BODY["Body from m-textblock,<br/>title from the first heading or og:title"]
+    BODY --> OK{"Claim or title found?"}
+    OK -- "no" --> PE[/"ParseError"/]
+    OK -- "yes" --> ART[/"Article"/]
+```
+
 **Polite fetcher rules** (`PoliteFetcher` in `sources/http.py`)
+
+```mermaid
+flowchart TD
+    URL[/"URL"/] --> SCH{"Starts with http or https?"}
+    SCH -- "no" --> VE[/"ValueError"/]
+    SCH -- "yes" --> ROB["_robots_for: read /robots.txt<br/>once for each host"]
+    ROB --> ALW{"allowed?"}
+    ALW -- "no" --> FB[/"FetchBlocked"/]
+    ALW -- "yes" --> WAIT["_wait_for_host:<br/>request delay since the last request"]
+    WAIT --> GET["GET with the truthtrace user agent"]
+    GET --> ST{"HTTP status"}
+    ST -- "200" --> BODY[/"Page bytes"/]
+    ST -- "429, 500, 502, 503, 504" --> RETRY{"Attempt 3 of 3?"}
+    RETRY -- "no" --> SLEEP["Wait, then double the wait"]
+    SLEEP --> WAIT
+    RETRY -- "yes" --> TE[/"TransientError"/]
+    ST -- "other status" --> FB
+```
 
 - The user agent is `truthtrace/0.1 (+<TRUTHTRACE_CONTACT_URL>)`. A user agent that contains `Mozilla` causes an error.
 - The fetcher reads `/robots.txt` once for each host. HTTP 200: obey it. HTTP 4xx: all paths are permitted. Other results: no path is permitted.
@@ -340,6 +540,27 @@ flowchart TB
 ## 6. The import stage
 
 **Purpose.** Load fact-checks from an export file (`import_file()` in `ingest.py`, `load_records()` in `sources/records.py`).
+
+```mermaid
+flowchart TD
+    F[/".jsonl, .ndjson or .csv file"/] --> RD["_read_text: utf-8-sig,<br/>then cp1252, then latin-1"]
+    RD --> TYPE{"File type?"}
+    TYPE -- "other" --> VE[/"ValueError, exit code 2"/]
+    TYPE -- "JSON lines" --> JL["json.loads each line,<br/>invalid line to errors"]
+    TYPE -- "CSV" --> CSV["csv.DictReader rows"]
+    JL --> MAP["Lower-case names, apply ALIASES"]
+    CSV --> MAP
+    MAP --> REQ{"url, and title or claim?"}
+    REQ -- "no" --> ERR["Row to errors with its line number"]
+    REQ -- "yes" --> ART["Article"]
+    ART --> UPS["store.upsert_article,<br/>indexer.sync_article"]
+    UPS --> EMB["indexer.embed_pending"]
+    EMB --> REP[/"IngestReport"/]
+    ERR --> REP
+    REP --> EXIT{"Any errors?"}
+    EXIT -- "yes" --> E1[/"Exit code 1"/]
+    EXIT -- "no" --> E0[/"Exit code 0"/]
+```
 
 | Input | Output |
 |---|---|
@@ -378,6 +599,41 @@ flowchart TB
 
 **Purpose.** Keep all fact-checks, chunks and vectors in one SQLite file (`Store` in `storage.py`).
 
+```mermaid
+erDiagram
+    articles ||--o{ chunks : "has"
+    articles {
+        int id PK
+        text url UK
+        text source
+        text title
+        text claim
+        text speaker
+        text rating
+        text label
+        text published
+        text summary
+        text body
+        text content_hash
+        text scraped_at
+        text updated_at
+    }
+    chunks {
+        text chunk_id PK
+        int article_id FK
+        text kind
+        int ord
+        text text
+        text text_hash
+        text embedder
+        blob vector
+    }
+    meta {
+        text key PK
+        text value
+    }
+```
+
 | Table | Key | Columns |
 |---|---|---|
 | `articles` | `id`, `url` (unique) | `source`, `title`, `claim`, `speaker`, `rating`, `label`, `published`, `summary`, `body`, `content_hash`, `scraped_at`, `updated_at` |
@@ -385,6 +641,20 @@ flowchart TB
 | `meta` | `key` | `index_version` |
 
 **Upsert procedure** (`upsert_article()`)
+
+```mermaid
+flowchart LR
+    A[/"Article"/] --> H["content_hash: SHA-256 of title, claim,<br/>speaker, rating, summary, body"]
+    H --> TX["BEGIN IMMEDIATE"]
+    TX --> FIND{"URL in articles?"}
+    FIND -- "yes, same hash" --> UN[/"unchanged"/]
+    FIND -- "yes, other hash" --> UP["UPDATE the row"]
+    FIND -- "no" --> INS["INSERT the row"]
+    UP --> BUMP["_bump_version"]
+    INS --> BUMP
+    BUMP --> CM["COMMIT"]
+    CM --> OUT[/"updated or inserted"/]
+```
 
 1. Calculate the SHA-256 content hash of title, claim, speaker, rating, summary and body.
 2. If the URL exists with the same hash, return `unchanged`.
@@ -404,6 +674,25 @@ flowchart TB
 ## 8. The index stage
 
 **Purpose.** Make the chunks of each fact-check and keep their vectors current (`Indexer` in `indexing.py`).
+
+```mermaid
+flowchart TD
+    ST[("Store: articles")] --> EACH["rebuild: for each article"]
+    EACH --> CARD["article_chunks: claim card id:claim:0"]
+    EACH --> WIN["chunk_words: 180-word windows,<br/>40 overlap, id:body:n"]
+    CARD --> SYNC["store.sync_chunks"]
+    WIN --> SYNC
+    SYNC --> DIFF{"Chunk ID and text_hash"}
+    DIFF -- "ID not wanted" --> DEL["Delete the chunk"]
+    DIFF -- "new or text changed" --> WR["Write the chunk,<br/>vector set to NULL"]
+    DIFF -- "same" --> KEEP["Keep the chunk and its vector"]
+    EACH -- "error" --> ERR["Add to errors,<br/>next article"]
+    DEL --> PEND
+    WR --> PEND
+    KEEP --> PEND["embed_pending: chunks with no vector<br/>or another embedder, 64 at a time"]
+    PEND --> REP[/"IndexReport"/]
+    ERR --> REP
+```
 
 | Input | Output |
 |---|---|
@@ -437,6 +726,22 @@ flowchart TB
 ## 9. The retrieval stage
 
 **Purpose.** Find the best fact-checks for a query (`HybridRetriever.search()` in `retrieval.py`).
+
+```mermaid
+flowchart TD
+    Q[/"Query, k, before"/] --> SNAP["_load: snapshot for the current index version"]
+    SNAP --> BM["BM25.top: 40 chunks"]
+    SNAP --> DN["_dense_top: 40 chunks<br/>with a positive dot product"]
+    BM --> RRF["Reciprocal rank fusion:<br/>1 / (60 + rank)"]
+    DN --> RRF
+    RRF --> WIN{"Article in the date window?"}
+    WIN -- "no" --> DROP["Drop"]
+    WIN -- "yes" --> BEST["Best chunk of each article"]
+    BEST --> GET["store.get_many"]
+    GET --> RR["Reranker: score passage and claim or title,<br/>relevance = higher score"]
+    RR --> SORT["Sort by relevance, then fused score"]
+    SORT --> OUT[/"Top k Evidence, IDs E1 to Ek"/]
+```
 
 | Input | Output |
 |---|---|
@@ -477,12 +782,41 @@ flowchart TB
 
 **Procedure: claim or question** (`classify_query()`)
 
+```mermaid
+flowchart LR
+    M[/"User message"/] --> NORM["Normalise the white space"]
+    NORM --> WR{"Starts with a claim wrapper?<br/>Is it true that, Fact check, Verify"}
+    WR -- "yes" --> STRIP["Remove the wrapper and the final ?"]
+    STRIP --> CL[/"claim"/]
+    WR -- "no" --> QQ{"Ends with ? or starts<br/>with a question word?"}
+    QQ -- "yes" --> QU[/"question"/]
+    QQ -- "no" --> CL2[/"claim"/]
+```
+
 1. Look for a claim wrapper at the start: `Is it true that`, `Is it correct that`, `Is it accurate that`, `Fact check`, `True or false`, `Verify`, `Check` or `Claim`.
 2. If there is a wrapper, the message is a claim. Remove the wrapper and the final "?".
 3. Otherwise, if the message ends with "?" or starts with a question word (who, what, is, does, can…), it is a question.
 4. Otherwise, it is a claim.
 
 **Procedure: claim**
+
+```mermaid
+flowchart TD
+    C[/"Claim"/] --> RET["retriever.search, keep relevance >= 0.2"]
+    RET --> ANY{"Any item left?"}
+    ANY -- "no" --> AB1[/"abstained: no fact-check addresses this"/]
+    ANY -- "yes" --> CM["claim_match for each rated item:<br/>similarity and problems"]
+    CM --> PROB["Problems: negation differs,<br/>or both have numbers that differ"]
+    PROB --> NEAR["Near matches: similarity >= 0.48"]
+    NEAR --> CONF{"Near matches without problems<br/>have supported and refuted?"}
+    CONF -- "yes" --> NOTE["Note: closely matching<br/>fact-checks disagree"]
+    CONF -- "no" --> USE{"Item without problems,<br/>similarity >= 0.6?"}
+    USE -- "yes" --> MATCH[/"matched_fact_check, label of the best item"/]
+    USE -- "no" --> LLMSET
+    NOTE --> LLMSET{"LLM set?"}
+    LLMSET -- "yes" --> JUDGE["_llm_judgement, see section 14"]
+    LLMSET -- "no" --> AB2[/"abstained: no fact-check rates this exact claim"/]
+```
 
 1. Retrieve the evidence. Keep only the items with a relevance of at least `TRUTHTRACE_ABSTAIN_THRESHOLD` (0.2).
 2. If no item remains, abstain: "I couldn't find a fact-check that addresses this."
@@ -495,6 +829,18 @@ flowchart TB
 
 **Procedure: question**
 
+```mermaid
+flowchart LR
+    Q[/"Question and relevant evidence"/] --> SET{"LLM set?"}
+    SET -- "no" --> EO1[/"evidence_only: titles of the top 3"/]
+    SET -- "yes" --> HIST["Last 2 x TRUTHTRACE_HISTORY_TURNS messages"]
+    HIST --> CALL["complete_json: answer_question,<br/>ANSWER_SCHEMA"]
+    CALL --> OK{"Answer text and one or more<br/>known citations?"}
+    CALL -- "LLM error" --> EO2[/"evidence_only: top 3 items"/]
+    OK -- "no" --> EO2
+    OK -- "yes" --> ANS[/"llm_answer, label unverifiable"/]
+```
+
 1. Retrieve and filter the evidence as for a claim.
 2. If no LLM is set, return the titles of the top 3 items. The method is `evidence_only`.
 3. Otherwise, send the question, the evidence and the last `2 × TRUTHTRACE_HISTORY_TURNS` chat messages to the LLM.
@@ -505,13 +851,31 @@ flowchart TB
 
 - The matched verdict text names the fact-checker, the speaker, the rating, the date and the checked claim.
 - Each note explains a decision, for example `E1 looks similar but one statement is negated and the other is not`.
-- An LLM error never fails the request. truthtrace abstains with the note `llm error`.
+- An LLM error never fails the request. For a claim, truthtrace abstains with the note `llm error`. For a question, truthtrace returns the top 3 items with the method `evidence_only`.
 
 ---
 
 ## 11. The LLM providers
 
 **Purpose.** Give the verifier one small interface to a language model (`llm.py`).
+
+```mermaid
+flowchart TD
+    SET[/"TRUTHTRACE_LLM_PROVIDER"/] --> BL{"build_llm"}
+    BL -- "none" --> NONE[/"No LLM"/]
+    BL -- "fake" --> FAKE["FakeLLM: rating of the<br/>first rated evidence"]
+    BL -- "gemini" --> KEY1{"GOOGLE_API_KEY set?"}
+    BL -- "openai" --> KEY2{"OPENAI_API_KEY set?"}
+    KEY1 -- "no" --> CE[/"ConfigError, exit code 2"/]
+    KEY2 -- "no" --> CE
+    KEY1 -- "yes" --> GEM["GeminiLLM: JSON MIME type"]
+    KEY2 -- "yes" --> OAI["OpenAILLM: strict JSON schema"]
+    GEM --> RETRY["_retry: 3 attempts,<br/>waits 2 s and 4 s on TransientError"]
+    OAI --> RETRY
+    RETRY --> PARSE["_parse_json: remove code fences,<br/>require a JSON object"]
+    FAKE --> PARSE2[/"dict for the verifier"/]
+    PARSE --> PARSE2
+```
 
 | Provider | Class | Default model | Output control |
 |---|---|---|---|
@@ -534,6 +898,22 @@ flowchart TB
 ## 12. The evaluation harness
 
 **Purpose.** Measure the verdict quality, the abstention rate and the retrieval quality (`evaluation.py`).
+
+```mermaid
+flowchart TD
+    OPT{"--cutoff or --liar?"} -- "cutoff" --> TS["time_split_examples: labelled claims<br/>published on or after the cutoff"]
+    OPT -- "liar" --> LI["load_liar_tsv: 3 or more columns,<br/>known label only"]
+    TS --> LIM["--limit"]
+    LI --> LIM
+    LIM --> NONE{"Any example?"}
+    NONE -- "no" --> E1[/"Exit code 1"/]
+    NONE -- "yes" --> VER["verifier.verify for each claim,<br/>before = cutoff for the time split"]
+    VER --> ANS["Answered: matched_fact_check<br/>or llm_judgement"]
+    ANS --> MET["coverage, accuracy, coarse accuracy,<br/>coarse macro-F1, citation_support"]
+    VER --> CONF["methods and confusion<br/>over all claims"]
+    MET --> REP[/"EvalReport as JSON"/]
+    CONF --> REP
+```
 
 | Input | Output |
 |---|---|
@@ -561,7 +941,7 @@ flowchart TB
 | `coarse_accuracy_answered` | Accuracy on the coarse groups, on the claims with a verdict |
 | `coarse_macro_f1_answered` | Macro-F1 over `supported`, `mixed`, `refuted` |
 | `coarse_accuracy_overall` | Coarse accuracy over all claims. An abstention counts as wrong |
-| `recall_at_k` | Fraction of claims with a known relevant URL in the top 5. `null` if no claim has a relevant URL |
+| `recall_at_k` | Fraction of claims with a known relevant URL in the top 5. `null` if no claim has a relevant URL. The time split and the LIAR loader give no relevant URLs, so the value is `null` at this time |
 | `citation_support` | Fraction of verdicts whose citations are in the evidence and point in the same coarse direction |
 | `methods` | Count of each method |
 | `confusion` | Gold coarse group against predicted coarse group |
@@ -573,6 +953,22 @@ flowchart TB
 ### 13.1 The CLI
 
 **Purpose.** Run all stages from a terminal (`cli.py`). Put the global option `--db PATH` before the subcommand.
+
+```mermaid
+flowchart TD
+    ARGS[/"truthtrace --db PATH subcommand"/] --> PARSE["build_parser, parse_args"]
+    PARSE --> SET["_settings: .env if present,<br/>Settings.from_env, --db override"]
+    SET --> CMD{"Subcommand"}
+    CMD -- "ingest, import, index, stats" --> SVC1["build_services without the LLM"]
+    CMD -- "check, eval" --> SVC2["build_services with the LLM from settings"]
+    CMD -- "demo" --> DEMO["run_demo: data/demo.db,<br/>fake provider, import the demo file"]
+    CMD -- "ui" --> UI["streamlit run ui/streamlit_app.py"]
+    SVC1 --> OUT[/"JSON report or results"/]
+    SVC2 --> OUT
+    DEMO --> OUT
+    SET -- "ConfigError" --> E2[/"error message, exit code 2"/]
+    OUT -. "TruthTraceError or ValueError in a step" .-> E2
+```
 
 | Command | Options | What it does |
 |---|---|---|
@@ -602,6 +998,28 @@ flowchart TB
 ### 13.2 The Streamlit UI and the chat session
 
 **Purpose.** Check claims in a browser chat with evidence cards (`ui/streamlit_app.py`, `chat.py`, `[ui]` extra).
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor U as User
+    participant UI as Streamlit page
+    participant CS as ChatSession
+    participant H as BoundedHistory
+    participant VER as Verifier
+
+    UI->>UI: services, cached: Settings.from_env, build_services
+    UI->>CS: one ChatSession for each browser session
+    U->>UI: claim or question in chat_input
+    UI->>CS: send(message)
+    CS->>H: messages, earlier turns only
+    CS->>VER: verify(message, history)
+    VER-->>CS: VerificationResult
+    CS->>H: add user message and short assistant summary
+    H->>H: keep 2 x history_turns messages and 4000 characters
+    CS-->>UI: result
+    UI-->>U: verdict badge, method, rationale, evidence cards, notes
+```
 
 1. Start the UI with `truthtrace ui`. The UI reads the settings and builds the services once for each process.
 2. If the store is empty, the UI shows a warning. Run `truthtrace ingest` or `truthtrace import` first.
@@ -650,10 +1068,25 @@ Flip-O-Meter ratings (`full flop`, `half flip`, `no flip`) describe consistency,
 | `matched_fact_check` | claim | The rating of the fact-check | A close match without problems and without conflict |
 | `llm_judgement` | claim | The LLM label | The LLM output passed validation |
 | `llm_answer` | question | `unverifiable` | The LLM answered with valid citations |
-| `evidence_only` | question | `unverifiable` | No LLM, or the LLM answer had no valid citation |
+| `evidence_only` | question | `unverifiable` | No LLM, an LLM error, or the LLM answer had no valid citation |
 | `abstained` | claim or question | `unverifiable` | Low relevance, no match and no LLM, failed validation, an LLM error, or an empty message |
 
 **LLM output validation** (`_llm_judgement()`)
+
+```mermaid
+flowchart TD
+    IN[/"Claim and relevant evidence"/] --> CALL["complete_json: judge_claim,<br/>JUDGE_SCHEMA"]
+    CALL -- "any exception" --> ERR[/"abstained, note llm error"/]
+    CALL --> LAB["Parse the label, keep known citation IDs"]
+    LAB --> UNK{"Unknown citation IDs?"}
+    UNK -- "yes" --> DROP["Drop them, add a note"]
+    UNK -- "no" --> CHK
+    DROP --> CHK{"Label on the 7 values, rationale not empty,<br/>and citations for a label other than unverifiable?"}
+    CHK -- "no" --> FAIL[/"abstained, note llm output failed validation"/]
+    CHK -- "yes" --> UV{"Label unverifiable?"}
+    UV -- "yes" --> AB[/"abstained"/]
+    UV -- "no" --> OK[/"llm_judgement with citations"/]
+```
 
 | Check | Result if it fails |
 |---|---|
